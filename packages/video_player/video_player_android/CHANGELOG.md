@@ -1,3 +1,16 @@
+## 2.4.5
+
+* Adds a namespace for compatibility with AGP 8.0.
+
+## 2.4.4
+
+* Synchronizes `VideoPlayerValue.isPlaying` with `ExoPlayer`.
+* Updates minimum Flutter version to 3.3.
+
+## 2.4.3
+
+* Bumps ExoPlayer version to 2.18.5.
+
 ## 2.4.2
 
 * Bumps ExoPlayer version to 2.18.4.

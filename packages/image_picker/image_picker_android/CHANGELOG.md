@@ -1,3 +1,12 @@
+## 0.8.6+8
+
+* Adds a namespace for compatibility with AGP 8.0.
+
+## 0.8.6+7
+
+* Fixes handling of non-bitmap image types.
+* Updates minimum Flutter version to 3.3.
+
 ## 0.8.6+6
 
 * Bumps androidx.core:core from 1.8.0 to 1.9.0.
