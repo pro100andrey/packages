@@ -1,3 +1,8 @@
+## 0.3.3+5
+
+* Adds pub topics to package metadata.
+* Updates minimum supported SDK version to Flutter 3.7/Dart 2.19.
+
 ## 0.3.3+4
 
 * Reverts an accidental change in a constructor argument's nullability.

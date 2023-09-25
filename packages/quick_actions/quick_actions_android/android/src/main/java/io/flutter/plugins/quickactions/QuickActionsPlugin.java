@@ -9,6 +9,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ShortcutManager;
 import android.os.Build;
+import androidx.annotation.ChecksSdkIntAtLeast;
+import androidx.annotation.NonNull;
+import androidx.annotation.VisibleForTesting;
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.embedding.engine.plugins.activity.ActivityAware;
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding;
@@ -23,6 +26,23 @@ public class QuickActionsPlugin implements FlutterPlugin, ActivityAware, NewInte
   private MethodChannel channel;
   private MethodCallHandlerImpl handler;
   private Activity activity;
+  private final @NonNull AndroidSdkChecker sdkChecker;
+
+  // Interface for an injectable SDK version checker.
+  @VisibleForTesting
+  interface AndroidSdkChecker {
+    @ChecksSdkIntAtLeast(parameter = 0)
+    boolean sdkIsAtLeast(int version);
+  }
+
+  public QuickActionsPlugin() {
+    this((int version) -> Build.VERSION.SDK_INT >= version);
+  }
+
+  @VisibleForTesting
+  QuickActionsPlugin(@NonNull AndroidSdkChecker capabilityChecker) {
+    this.sdkChecker = capabilityChecker;
+  }
 
   /**
    * Plugin registration.
@@ -30,23 +50,24 @@ public class QuickActionsPlugin implements FlutterPlugin, ActivityAware, NewInte
    * <p>Must be called when the application is created.
    */
   @SuppressWarnings("deprecation")
-  public static void registerWith(io.flutter.plugin.common.PluginRegistry.Registrar registrar) {
+  public static void registerWith(
+      @NonNull io.flutter.plugin.common.PluginRegistry.Registrar registrar) {
     final QuickActionsPlugin plugin = new QuickActionsPlugin();
     plugin.setupChannel(registrar.messenger(), registrar.context(), registrar.activity());
   }
 
   @Override
-  public void onAttachedToEngine(FlutterPluginBinding binding) {
+  public void onAttachedToEngine(@NonNull FlutterPluginBinding binding) {
     setupChannel(binding.getBinaryMessenger(), binding.getApplicationContext(), null);
   }
 
   @Override
-  public void onDetachedFromEngine(FlutterPluginBinding binding) {
+  public void onDetachedFromEngine(@NonNull FlutterPluginBinding binding) {
     teardownChannel();
   }
 
   @Override
-  public void onAttachedToActivity(ActivityPluginBinding binding) {
+  public void onAttachedToActivity(@NonNull ActivityPluginBinding binding) {
     activity = binding.getActivity();
     handler.setActivity(activity);
     binding.addOnNewIntentListener(this);
@@ -59,7 +80,7 @@ public class QuickActionsPlugin implements FlutterPlugin, ActivityAware, NewInte
   }
 
   @Override
-  public void onReattachedToActivityForConfigChanges(ActivityPluginBinding binding) {
+  public void onReattachedToActivityForConfigChanges(@NonNull ActivityPluginBinding binding) {
     binding.removeOnNewIntentListener(this);
     onAttachedToActivity(binding);
   }
@@ -70,9 +91,9 @@ public class QuickActionsPlugin implements FlutterPlugin, ActivityAware, NewInte
   }
 
   @Override
-  public boolean onNewIntent(Intent intent) {
+  public boolean onNewIntent(@NonNull Intent intent) {
     // Do nothing for anything lower than API 25 as the functionality isn't supported.
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N_MR1) {
+    if (!sdkChecker.sdkIsAtLeast(Build.VERSION_CODES.N_MR1)) {
       return false;
     }
     // Notify the Dart side if the launch intent has the intent extra relevant to quick actions.

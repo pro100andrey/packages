@@ -8,11 +8,14 @@
 
 #import <OCMock/OCMock.h>
 #import <video_player_avfoundation/AVAssetTrackUtils.h>
+#import <video_player_avfoundation/FLTVideoPlayerPlugin_Test.h>
 
 @interface FLTVideoPlayer : NSObject <FlutterStreamHandler>
 @property(readonly, nonatomic) AVPlayer *player;
 @property(readonly, nonatomic) AVPlayerLayer *playerLayer;
 @property(readonly, nonatomic) int64_t position;
+
+- (void)onTextureUnregistered:(NSObject<FlutterTexture> *)texture;
 @end
 
 @interface FLTVideoPlayerPlugin (Test) <FLTAVFoundationVideoPlayerApi>
@@ -59,6 +62,46 @@
 @end
 
 @interface VideoPlayerTests : XCTestCase
+@end
+
+@interface StubAVPlayer : AVPlayer
+@property(readonly, nonatomic) NSNumber *beforeTolerance;
+@property(readonly, nonatomic) NSNumber *afterTolerance;
+@end
+
+@implementation StubAVPlayer
+
+- (void)seekToTime:(CMTime)time
+      toleranceBefore:(CMTime)toleranceBefore
+       toleranceAfter:(CMTime)toleranceAfter
+    completionHandler:(void (^)(BOOL finished))completionHandler {
+  _beforeTolerance = [NSNumber numberWithLong:toleranceBefore.value];
+  _afterTolerance = [NSNumber numberWithLong:toleranceAfter.value];
+  completionHandler(YES);
+}
+
+@end
+
+@interface StubFVPPlayerFactory : NSObject <FVPPlayerFactory>
+
+@property(nonatomic, strong) StubAVPlayer *stubAVPlayer;
+
+- (instancetype)initWithPlayer:(StubAVPlayer *)stubAVPlayer;
+
+@end
+
+@implementation StubFVPPlayerFactory
+
+- (instancetype)initWithPlayer:(StubAVPlayer *)stubAVPlayer {
+  self = [super init];
+  _stubAVPlayer = stubAVPlayer;
+  return self;
+}
+
+- (AVPlayer *)playerWithPlayerItem:(AVPlayerItem *)playerItem {
+  return _stubAVPlayer;
+}
+
 @end
 
 @implementation VideoPlayerTests
@@ -166,6 +209,52 @@
   [self waitForExpectationsWithTimeout:30.0 handler:nil];
 }
 
+- (void)testBufferingStateFromPlayer {
+  NSObject<FlutterPluginRegistry> *registry =
+      (NSObject<FlutterPluginRegistry> *)[[UIApplication sharedApplication] delegate];
+  NSObject<FlutterPluginRegistrar> *registrar =
+      [registry registrarForPlugin:@"testLiveStreamBufferEndFromPlayer"];
+  FLTVideoPlayerPlugin *videoPlayerPlugin =
+      (FLTVideoPlayerPlugin *)[[FLTVideoPlayerPlugin alloc] initWithRegistrar:registrar];
+
+  FlutterError *error;
+  [videoPlayerPlugin initialize:&error];
+  XCTAssertNil(error);
+
+  FLTCreateMessage *create = [FLTCreateMessage
+      makeWithAsset:nil
+                uri:@"https://flutter.github.io/assets-for-api-docs/assets/videos/bee.mp4"
+        packageName:nil
+         formatHint:nil
+        httpHeaders:@{}];
+  FLTTextureMessage *textureMessage = [videoPlayerPlugin create:create error:&error];
+  XCTAssertNil(error);
+  XCTAssertNotNil(textureMessage);
+  FLTVideoPlayer *player = videoPlayerPlugin.playersByTextureId[textureMessage.textureId];
+  XCTAssertNotNil(player);
+  AVPlayer *avPlayer = player.player;
+  [avPlayer play];
+
+  [player onListenWithArguments:nil
+                      eventSink:^(NSDictionary<NSString *, id> *event) {
+                        if ([event[@"event"] isEqualToString:@"bufferingEnd"]) {
+                          XCTAssertTrue(avPlayer.currentItem.isPlaybackLikelyToKeepUp);
+                        }
+
+                        if ([event[@"event"] isEqualToString:@"bufferingStart"]) {
+                          XCTAssertFalse(avPlayer.currentItem.isPlaybackLikelyToKeepUp);
+                        }
+                      }];
+  XCTestExpectation *bufferingStateExpectation =
+      [self expectationWithDescription:@"bufferingState"];
+  NSTimeInterval timeout = 10;
+  dispatch_time_t delay = dispatch_time(DISPATCH_TIME_NOW, timeout * NSEC_PER_SEC);
+  dispatch_after(delay, dispatch_get_main_queue(), ^{
+    [bufferingStateExpectation fulfill];
+  });
+  [self waitForExpectationsWithTimeout:timeout + 1 handler:nil];
+}
+
 - (void)testVideoControls {
   NSObject<FlutterPluginRegistry> *registry =
       (NSObject<FlutterPluginRegistry> *)[[UIApplication sharedApplication] delegate];
@@ -226,6 +315,81 @@
   [self validateTransformFixForOrientation:UIImageOrientationRightMirrored];
 }
 
+- (void)testSeekToleranceWhenNotSeekingToEnd {
+  NSObject<FlutterPluginRegistry> *registry =
+      (NSObject<FlutterPluginRegistry> *)[[UIApplication sharedApplication] delegate];
+  NSObject<FlutterPluginRegistrar> *registrar = [registry registrarForPlugin:@"TestSeekTolerance"];
+
+  StubAVPlayer *stubAVPlayer = [[StubAVPlayer alloc] init];
+  StubFVPPlayerFactory *stubFVPPlayerFactory =
+      [[StubFVPPlayerFactory alloc] initWithPlayer:stubAVPlayer];
+  FLTVideoPlayerPlugin *pluginWithMockAVPlayer =
+      [[FLTVideoPlayerPlugin alloc] initWithPlayerFactory:stubFVPPlayerFactory registrar:registrar];
+
+  FlutterError *error;
+  [pluginWithMockAVPlayer initialize:&error];
+  XCTAssertNil(error);
+
+  FLTCreateMessage *create = [FLTCreateMessage
+      makeWithAsset:nil
+                uri:@"https://flutter.github.io/assets-for-api-docs/assets/videos/bee.mp4"
+        packageName:nil
+         formatHint:nil
+        httpHeaders:@{}];
+  FLTTextureMessage *textureMessage = [pluginWithMockAVPlayer create:create error:&error];
+  NSNumber *textureId = textureMessage.textureId;
+
+  XCTestExpectation *initializedExpectation =
+      [self expectationWithDescription:@"seekTo has zero tolerance when seeking not to end"];
+  FLTPositionMessage *message = [FLTPositionMessage makeWithTextureId:textureId position:@1234];
+  [pluginWithMockAVPlayer seekTo:message
+                      completion:^(FlutterError *_Nullable error) {
+                        [initializedExpectation fulfill];
+                      }];
+
+  [self waitForExpectationsWithTimeout:30.0 handler:nil];
+  XCTAssertEqual([stubAVPlayer.beforeTolerance intValue], 0);
+  XCTAssertEqual([stubAVPlayer.afterTolerance intValue], 0);
+}
+
+- (void)testSeekToleranceWhenSeekingToEnd {
+  NSObject<FlutterPluginRegistry> *registry =
+      (NSObject<FlutterPluginRegistry> *)[[UIApplication sharedApplication] delegate];
+  NSObject<FlutterPluginRegistrar> *registrar =
+      [registry registrarForPlugin:@"TestSeekToEndTolerance"];
+
+  StubAVPlayer *stubAVPlayer = [[StubAVPlayer alloc] init];
+  StubFVPPlayerFactory *stubFVPPlayerFactory =
+      [[StubFVPPlayerFactory alloc] initWithPlayer:stubAVPlayer];
+  FLTVideoPlayerPlugin *pluginWithMockAVPlayer =
+      [[FLTVideoPlayerPlugin alloc] initWithPlayerFactory:stubFVPPlayerFactory registrar:registrar];
+
+  FlutterError *error;
+  [pluginWithMockAVPlayer initialize:&error];
+  XCTAssertNil(error);
+
+  FLTCreateMessage *create = [FLTCreateMessage
+      makeWithAsset:nil
+                uri:@"https://flutter.github.io/assets-for-api-docs/assets/videos/bee.mp4"
+        packageName:nil
+         formatHint:nil
+        httpHeaders:@{}];
+  FLTTextureMessage *textureMessage = [pluginWithMockAVPlayer create:create error:&error];
+  NSNumber *textureId = textureMessage.textureId;
+
+  XCTestExpectation *initializedExpectation =
+      [self expectationWithDescription:@"seekTo has non-zero tolerance when seeking to end"];
+  // The duration of this video is "0" due to the non standard initiliatazion process.
+  FLTPositionMessage *message = [FLTPositionMessage makeWithTextureId:textureId position:@0];
+  [pluginWithMockAVPlayer seekTo:message
+                      completion:^(FlutterError *_Nullable error) {
+                        [initializedExpectation fulfill];
+                      }];
+  [self waitForExpectationsWithTimeout:30.0 handler:nil];
+  XCTAssertGreaterThan([stubAVPlayer.beforeTolerance intValue], 0);
+  XCTAssertGreaterThan([stubAVPlayer.afterTolerance intValue], 0);
+}
+
 - (NSDictionary<NSString *, id> *)testPlugin:(FLTVideoPlayerPlugin *)videoPlayerPlugin
                                          uri:(NSString *)uri {
   FlutterError *error;
@@ -278,6 +442,110 @@
   [player onCancelWithArguments:nil];
 
   return initializationEvent;
+}
+
+// Checks whether [AVPlayer rate] KVO observations are correctly detached.
+// - https://github.com/flutter/flutter/issues/124937
+//
+// Failing to de-register results in a crash in [AVPlayer willChangeValueForKey:].
+- (void)testDoesNotCrashOnRateObservationAfterDisposal {
+  NSObject<FlutterPluginRegistry> *registry =
+      (NSObject<FlutterPluginRegistry> *)[[UIApplication sharedApplication] delegate];
+  NSObject<FlutterPluginRegistrar> *registrar =
+      [registry registrarForPlugin:@"testDoesNotCrashOnRateObservationAfterDisposal"];
+
+  AVPlayer *avPlayer = nil;
+  __weak FLTVideoPlayer *player = nil;
+
+  // Autoreleasepool is needed to simulate conditions of FLTVideoPlayer deallocation.
+  @autoreleasepool {
+    FLTVideoPlayerPlugin *videoPlayerPlugin =
+        (FLTVideoPlayerPlugin *)[[FLTVideoPlayerPlugin alloc] initWithRegistrar:registrar];
+
+    FlutterError *error;
+    [videoPlayerPlugin initialize:&error];
+    XCTAssertNil(error);
+
+    FLTCreateMessage *create = [FLTCreateMessage
+        makeWithAsset:nil
+                  uri:@"https://flutter.github.io/assets-for-api-docs/assets/videos/bee.mp4"
+          packageName:nil
+           formatHint:nil
+          httpHeaders:@{}];
+    FLTTextureMessage *textureMessage = [videoPlayerPlugin create:create error:&error];
+    XCTAssertNil(error);
+    XCTAssertNotNil(textureMessage);
+
+    player = videoPlayerPlugin.playersByTextureId[textureMessage.textureId];
+    XCTAssertNotNil(player);
+    avPlayer = player.player;
+
+    [videoPlayerPlugin dispose:textureMessage error:&error];
+    XCTAssertNil(error);
+  }
+
+  // [FLTVideoPlayerPlugin dispose:error:] selector is dispatching the [FLTVideoPlayer dispose] call
+  // with a 1-second delay keeping a strong reference to the player. The polling ensures the player
+  // was truly deallocated.
+  [self expectationForPredicate:[NSPredicate predicateWithFormat:@"self != nil"]
+            evaluatedWithObject:player
+                        handler:nil];
+  [self waitForExpectationsWithTimeout:10.0 handler:nil];
+
+  [avPlayer willChangeValueForKey:@"rate"];  // No assertions needed. Lack of crash is a success.
+}
+
+// During the hot reload:
+//  1. `[FLTVideoPlayer onTextureUnregistered:]` gets called.
+//  2. `[FLTVideoPlayerPlugin initialize:]` gets called.
+//
+// Both of these methods dispatch [FLTVideoPlayer dispose] on the main thread
+// leading to a possible crash when de-registering observers twice.
+- (void)testHotReloadDoesNotCrash {
+  NSObject<FlutterPluginRegistry> *registry =
+      (NSObject<FlutterPluginRegistry> *)[[UIApplication sharedApplication] delegate];
+  NSObject<FlutterPluginRegistrar> *registrar =
+      [registry registrarForPlugin:@"testHotReloadDoesNotCrash"];
+
+  __weak FLTVideoPlayer *player = nil;
+
+  // Autoreleasepool is needed to simulate conditions of FLTVideoPlayer deallocation.
+  @autoreleasepool {
+    FLTVideoPlayerPlugin *videoPlayerPlugin =
+        (FLTVideoPlayerPlugin *)[[FLTVideoPlayerPlugin alloc] initWithRegistrar:registrar];
+
+    FlutterError *error;
+    [videoPlayerPlugin initialize:&error];
+    XCTAssertNil(error);
+
+    FLTCreateMessage *create = [FLTCreateMessage
+        makeWithAsset:nil
+                  uri:@"https://flutter.github.io/assets-for-api-docs/assets/videos/bee.mp4"
+          packageName:nil
+           formatHint:nil
+          httpHeaders:@{}];
+    FLTTextureMessage *textureMessage = [videoPlayerPlugin create:create error:&error];
+    XCTAssertNil(error);
+    XCTAssertNotNil(textureMessage);
+
+    player = videoPlayerPlugin.playersByTextureId[textureMessage.textureId];
+    XCTAssertNotNil(player);
+
+    [player onTextureUnregistered:nil];
+    XCTAssertNil(error);
+
+    [videoPlayerPlugin initialize:&error];
+    XCTAssertNil(error);
+  }
+
+  // [FLTVideoPlayerPlugin dispose:error:] selector is dispatching the [FLTVideoPlayer dispose] call
+  // with a 1-second delay keeping a strong reference to the player. The polling ensures the player
+  // was truly deallocated.
+  [self expectationForPredicate:[NSPredicate predicateWithFormat:@"self != nil"]
+            evaluatedWithObject:player
+                        handler:nil];
+  [self waitForExpectationsWithTimeout:10.0
+                               handler:nil];  // No assertions needed. Lack of crash is a success.
 }
 
 - (void)validateTransformFixForOrientation:(UIImageOrientation)orientation {
